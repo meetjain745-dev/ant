@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Traveling Salesman Solver (ACO & SMA)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for canvas and responsiveness */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117;
+            color: #c9d1d9;
+        }
+        .canvas-container {
+            border: 2px solid #2e3b4d;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+            background-color: #161b22;
+            cursor: crosshair;
+            border-radius: 0.5rem;
+            max-width: 95%;
+            margin: 0 auto;
+        }
+        #tspCanvas {
+            display: block;
+        }
+        .city-node {
+            background-color: #58a6ff;
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            width: 12px;
+            height: 12px;
+            position: absolute;
+            transform: translate(-50%, -50%);
+            pointer-events: none; /* Let clicks pass through to canvas */
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8 min-h-screen">
+
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-extrabold mb-4 text-center text-blue-400">
+            Interactive TSP Solver
+        </h1>
+        <p class="text-center text-sm mb-6 text-gray-400">
+            Click on the canvas below to add cities. Drag them to reposition.
+            Select an algorithm to find the shortest path.
+        </p>
+
+        <!-- Controls Section -->
+        <div class="bg-gray-800 p-4 rounded-lg shadow-xl mb-6 flex flex-col md:flex-row items-center justify-between space-y-4 md:space-y-0 md:space-x-4">
+            
+            <!-- Algorithm Selector -->
+            <div class="flex-grow">
+                <label for="algorithmSelect" class="block text-sm font-medium mb-1 text-gray-300">Select Algorithm</label>
+                <select id="algorithmSelect" class="w-full bg-gray-700 border border-gray-600 text-white rounded-md p-2 focus:ring-blue-500 focus:border-blue-500">
+                    <option value="ACO">Ant Colony Optimization (ACO)</option>
+                    <option value="SMA">Slime Mold Algorithm (SMA)</option>
+                </select>
+            </div>
+
+            <!-- Best Length Display -->
+            <div class="bg-gray-700 p-2 rounded-md border border-gray-600 w-full md:w-auto">
+                <p class="text-sm font-medium text-gray-400">Best Path Length:</p>
+                <p id="bestLengthDisplay" class="text-lg font-bold text-green-400">--</p>
+            </div>
+
+            <!-- Controls -->
+            <div class="flex space-x-2 w-full md:w-auto">
+                <button id="startButton" class="w-full md:w-auto bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 shadow-md active:scale-95">
+                    Start Optimization
+                </button>
+                <button id="resetButton" class="w-full md:w-auto bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 shadow-md active:scale-95">
+                    Reset
+                </button>
+            </div>
+        </div>
+
+        <!-- Canvas Container -->
+        <div class="canvas-container" style="height: 500px;">
+            <canvas id="tspCanvas"></canvas>
+        </div>
+
+    </div>
+
+    <script>
+        const canvas = document.getElementById('tspCanvas');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const resetButton = document.getElementById('resetButton');
+        const algorithmSelect = document.getElementById('algorithmSelect');
+        const bestLengthDisplay = document.getElementById('bestLengthDisplay');
+
+        // --- Core State Variables ---
+        let cities = [];
+        let pheromones = []; // Shared matrix for pheromones (ACO) or thickness (SMA)
+        let bestPath = [];
+        let bestLength = Infinity;
+        let isRunning = false;
+        let animationFrameId = null;
+        let selectedCityIndex = -1;
+        let CITY_RADIUS = 5;
+        let NUM_CITIES = 0;
+
+        // --- Core Algorithm Constants ---
+        const INITIAL_MATRIX_VALUE = 1; // Used for initial pheromone/thickness level
+
+        // --- ACO Parameters ---
+        const ACO_PARAMS = {
+            NUM_ANTS: 10,
+            RHO: 0.1,   // Evaporation Rate
+            ALPHA: 1,   // Pheromone influence
+            BETA: 5,    // Distance influence
+            Q: 100      // Pheromone deposit constant
+        };
+
+        // --- SMA Parameters (Heuristic Approximation) ---
+        const SMA_PARAMS = {
+            DECAY_RATE: 0.05,
+            SMA_SEARCH_ATTEMPTS: 50 // Number of random paths to test per iteration
+        };
+
+
+        // --- Utility Functions ---
+
+        /**
+         * Calculates Euclidean distance between two cities.
+         * @param {object} c1 
+         * @param {object} c2 
+         * @returns {number} Distance
+         */
+        function distance(c1, c2) {
+            return Math.sqrt(Math.pow(c1.x - c2.x, 2) + Math.pow(c1.y - c2.y, 2));
+        }
+
+        /**
+         * Calculates the total length of a given path (tour).
+         * @param {number[]} path - Array of city indices
+         * @returns {number} Total length
+         */
+        function calculatePathLength(path) {
+            let len = 0;
+            if (path.length < 2) return 0;
+            for (let i = 0; i < path.length; i++) {
+                const c1 = cities[path[i]];
+                const c2 = cities[path[(i + 1) % path.length]]; // Loop back to start
+                len += distance(c1, c2);
+            }
+            return len;
+        }
+
+        /**
+         * Initializes the pheromone/thickness matrix and optimization variables.
+         */
+        function initOptimization() {
+            NUM_CITIES = cities.length;
+            if (NUM_CITIES < 3) {
+                pheromones = [];
+                bestPath = [];
+                bestLength = Infinity;
+                bestLengthDisplay.textContent = "--";
+                return;
+            }
+
+            // Initialize pheromones/thickness matrix
+            pheromones = Array(NUM_CITIES).fill(0).map(() => 
+                Array(NUM_CITIES).fill(INITIAL_MATRIX_VALUE) // Using new constant
+            );
+            
+            // Initialize best path (a simple sequential tour)
+            bestPath = Array.from({ length: NUM_CITIES }, (_, i) => i);
+            bestLength = calculatePathLength(bestPath);
+            bestLengthDisplay.textContent = bestLength.toFixed(2);
+        }
+
+        // --- Algorithm Implementations ---
+
+        /**
+         * ACO Iteration: Simulate ants finding paths and update pheromones.
+         */
+        function runACOIteration() {
+            if (NUM_CITIES < 3) return;
+
+            const tours = [];
+
+            // 1. Ant movement and path construction
+            for (let k = 0; k < ACO_PARAMS.NUM_ANTS; k++) { // Using ACO_PARAMS
+                let currentTour = [];
+                let visited = new Set();
+                let startCity = Math.floor(Math.random() * NUM_CITIES);
+                let currentCity = startCity;
+
+                currentTour.push(currentCity);
+                visited.add(currentCity);
+
+                // Build the tour
+                while (currentTour.length < NUM_CITIES) {
+                    let nextCity = selectNextCityACO(currentCity, visited);
+                    if (nextCity === -1) break;
+                    currentTour.push(nextCity);
+                    visited.add(nextCity);
+                    currentCity = nextCity;
+                }
+
+                if (currentTour.length === NUM_CITIES) {
+                    tours.push({ 
+                        path: currentTour, 
+                        length: calculatePathLength(currentTour) 
+                    });
+                }
+            }
+
+            // 2. Update global best path
+            let currentBestTour = tours.reduce((min, tour) => 
+                tour.length < min.length ? tour : min, { length: Infinity }
+            );
+
+            if (currentBestTour.length < bestLength) {
+                bestLength = currentBestTour.length;
+                bestPath = currentBestTour.path;
+                bestLengthDisplay.textContent = bestLength.toFixed(2);
+            }
+
+            // 3. Pheromone Evaporation (all paths)
+            for (let i = 0; i < NUM_CITIES; i++) {
+                for (let j = 0; j < NUM_CITIES; j++) {
+                    if (i !== j) {
+                        pheromones[i][j] *= (1.0 - ACO_PARAMS.RHO); // Using ACO_PARAMS
+                    }
+                }
+            }
+
+            // 4. Pheromone Deposition (only best path is reinforced)
+            for (let i = 0; i < NUM_CITIES; i++) {
+                const c1 = bestPath[i];
+                const c2 = bestPath[(i + 1) % NUM_CITIES];
+                const delta = ACO_PARAMS.Q / bestLength; // Using ACO_PARAMS
+                pheromones[c1][c2] += delta;
+                pheromones[c2][c1] += delta; // TSP is symmetric
+            }
+        }
+
+        /**
+         * Probabilistic selection of the next city for an ant (ACO).
+         */
+        function selectNextCityACO(currentCity, visited) {
+            let totalProbability = 0;
+            const probabilities = [];
+
+            // Calculate desirability (pheromone * heuristic) for unvisited cities
+            for (let nextCity = 0; nextCity < NUM_CITIES; nextCity++) {
+                if (!visited.has(nextCity)) {
+                    const dist = distance(cities[currentCity], cities[nextCity]);
+                    const tau = pheromones[currentCity][nextCity];
+                    
+                    // Desirability: (Pheromone^Alpha) * (InverseDistance^Beta)
+                    const desirability = Math.pow(tau, ACO_PARAMS.ALPHA) * Math.pow(1.0 / dist, ACO_PARAMS.BETA); // Using ACO_PARAMS
+                    
+                    probabilities.push({ city: nextCity, desirability: desirability });
+                    totalProbability += desirability;
+                }
+            }
+
+            if (totalProbability <= 0) return -1; // No unvisited cities
+
+            // Roulette Wheel Selection
+            let r = Math.random() * totalProbability;
+            let cumulativeProbability = 0;
+
+            for (const { city, desirability } of probabilities) {
+                cumulativeProbability += desirability;
+                if (r <= cumulativeProbability) {
+                    return city;
+                }
+            }
+            return -1; // Should not happen
+        }
+
+        /**
+         * SMA Iteration (Heuristic Approximation): Generate random paths and apply 
+         * thickness update based on efficiency (inverse path length).
+         */
+        function runSMAIteration() {
+            if (NUM_CITIES < 3) return;
+
+            // 1. Path Generation and Evaluation (Simulating Spore/Vein Search)
+            let currentBestPath = bestPath;
+            let currentBestLength = bestLength;
+
+            for (let i = 0; i < SMA_PARAMS.SMA_SEARCH_ATTEMPTS; i++) { // Using SMA_PARAMS
+                // Generate a random path (shuffle the existing path)
+                let newPath = [...currentBestPath].sort(() => Math.random() - 0.5);
+                let newLength = calculatePathLength(newPath);
+
+                // Use 2-opt local search guided by path thickness
+                // (Simplified: just apply 2-opt)
+                const optimized = twoOpt(newPath, newLength);
+                newPath = optimized.path;
+                newLength = optimized.length;
+
+                if (newLength < currentBestLength) {
+                    currentBestLength = newLength;
+                    currentBestPath = newPath;
+                }
+            }
+
+            // 2. Global Update
+            if (currentBestLength < bestLength) {
+                bestLength = currentBestLength;
+                bestPath = currentBestPath;
+                bestLengthDisplay.textContent = bestLength.toFixed(2);
+            }
+
+            // 3. Thickness Decay (Vein evaporation/shrinking)
+            for (let i = 0; i < NUM_CITIES; i++) {
+                for (let j = 0; j < NUM_CITIES; j++) {
+                    if (i !== j) {
+                        // Apply decay, but ensure thickness doesn't go below 1
+                        pheromones[i][j] = Math.max(INITIAL_MATRIX_VALUE, pheromones[i][j] * (1.0 - SMA_PARAMS.DECAY_RATE)); // Using new constants
+                    }
+                }
+            }
+
+            // 4. Thickness Reinforcement (Plasma flow to the most efficient veins)
+            // Reinforce the current global best path segments.
+            for (let i = 0; i < NUM_CITIES; i++) {
+                const c1 = bestPath[i];
+                const c2 = bestPath[(i + 1) % NUM_CITIES];
+                // Reinforcement is proportional to the inverse of the global best path length (efficiency)
+                const reinforcement = 1000 / bestLength; 
+                pheromones[c1][c2] += reinforcement;
+                pheromones[c2][c1] += reinforcement; 
+            }
+        }
+        
+        // --- Local Search Helper (Used in SMA for refinement) ---
+        function twoOpt(path, length) {
+            let bestPath = path;
+            let bestLength = length;
+            let improved = true;
+
+            while (improved) {
+                improved = false;
+                for (let i = 1; i < NUM_CITIES - 1; i++) {
+                    for (let k = i + 1; k < NUM_CITIES; k++) {
+                        let newPath = twoOptSwap(bestPath, i, k);
+                        let newLength = calculatePathLength(newPath);
+
+                        if (newLength < bestLength) {
+                            bestLength = newLength;
+                            bestPath = newPath;
+                            improved = true;
+                        }
+                    }
+                }
+            }
+            return { path: bestPath, length: bestLength };
+        }
+
+        function twoOptSwap(path, i, k) {
+            // Reverses the segment of the path from index i to k (inclusive)
+            let newPath = path.slice(0, i);
+            let reversedSegment = path.slice(i, k + 1).reverse();
+            newPath.push(...reversedSegment);
+            newPath.push(...path.slice(k + 1));
+            return newPath;
+        }
+
+
+        // --- Drawing and Canvas Functions ---
+
+        /**
+         * Redraws the canvas with cities and the current best path.
+         */
+        function draw() {
+            // Resize canvas to fill container while maintaining a max height
+            const container = canvas.parentElement;
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 1. Draw Pheromones/Thickness (faded lines for background influence)
+            if (NUM_CITIES > 1 && pheromones.length > 0) {
+                const maxPheromone = pheromones.flat().reduce((a, b) => Math.max(a, b), 0);
+                
+                for (let i = 0; i < NUM_CITIES; i++) {
+                    for (let j = i + 1; j < NUM_CITIES; j++) {
+                        const c1 = cities[i];
+                        const c2 = cities[j];
+                        const thickness = pheromones[i][j];
+                        
+                        // Normalized thickness for alpha and width
+                        const normThickness = (thickness - INITIAL_MATRIX_VALUE) / (maxPheromone - INITIAL_MATRIX_VALUE + 1e-6); // Using new constant
+                        
+                        ctx.beginPath();
+                        ctx.moveTo(c1.x, c1.y);
+                        ctx.lineTo(c2.x, c2.y);
+                        ctx.lineWidth = 1 + normThickness * 2; // Max width 3px
+                        ctx.strokeStyle = `rgba(139, 92, 246, ${0.1 + normThickness * 0.3})`; // Purple background lines
+                        ctx.stroke();
+                    }
+                }
+            }
+
+
+            // 2. Draw Best Path (Bold Line)
+            if (bestPath.length >= 2) {
+                ctx.beginPath();
+                ctx.strokeStyle = '#34d399'; // Green path
+                ctx.lineWidth = 3;
+                
+                // Move to the starting city
+                ctx.moveTo(cities[bestPath[0]].x, cities[bestPath[0]].y);
+                
+                // Draw lines between cities in the best path order
+                for (let i = 1; i < bestPath.length; i++) {
+                    const cityIndex = bestPath[i];
+                    ctx.lineTo(cities[cityIndex].x, cities[cityIndex].y);
+                }
+                
+                // Close the loop
+                ctx.lineTo(cities[bestPath[0]].x, cities[bestPath[0]].y);
+                ctx.stroke();
+            }
+
+            // 3. Draw Cities (Nodes)
+            cities.forEach((city, index) => {
+                ctx.beginPath();
+                ctx.arc(city.x, city.y, CITY_RADIUS, 0, Math.PI * 2);
+                ctx.fillStyle = index === 0 ? '#f97316' : '#58a6ff'; // Start city is orange
+                ctx.fill();
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Draw index label
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(index, city.x, city.y - 10);
+            });
+        }
+
+        // --- Main Loop and Control ---
+
+        /**
+         * Main animation loop. Runs the algorithm iteration and redraws the canvas.
+         */
+        function gameLoop() {
+            if (!isRunning) return;
+
+            const algorithm = algorithmSelect.value;
+            if (algorithm === 'ACO') {
+                runACOIteration();
+            } else if (algorithm === 'SMA') {
+                runSMAIteration();
+            }
+
+            draw();
+            animationFrameId = requestAnimationFrame(gameLoop);
+        }
+
+        /**
+         * Starts the optimization process.
+         */
+        function startOptimization() {
+            if (isRunning) return;
+            if (cities.length < 3) {
+                alertModal("Add more cities!", "Please add at least 3 cities to run the TSP algorithms.", "warning");
+                return;
+            }
+
+            initOptimization();
+            isRunning = true;
+            startButton.textContent = 'Running... (Stop)';
+            startButton.classList.remove('bg-green-600', 'hover:bg-green-700');
+            startButton.classList.add('bg-yellow-600', 'hover:bg-yellow-700');
+            gameLoop();
+        }
+
+        /**
+         * Stops the optimization process.
+         */
+        function stopOptimization() {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
+            isRunning = false;
+            startButton.textContent = 'Start Optimization';
+            startButton.classList.remove('bg-yellow-600', 'hover:bg-yellow-700');
+            startButton.classList.add('bg-green-600', 'hover:bg-green-700');
+        }
+
+        /**
+         * Resets the entire state (cities, path, and stops optimization).
+         */
+        function resetState() {
+            stopOptimization();
+            cities = [];
+            bestPath = [];
+            bestLength = Infinity;
+            bestLengthDisplay.textContent = "--";
+            draw();
+        }
+
+        // --- Event Handlers and Initial Setup ---
+
+        startButton.addEventListener('click', () => {
+            if (isRunning) {
+                stopOptimization();
+            } else {
+                startOptimization();
+            }
+        });
+
+        resetButton.addEventListener('click', resetState);
+
+        algorithmSelect.addEventListener('change', () => {
+            if (isRunning) {
+                // Re-initialize pheromones if switching algorithms while running
+                stopOptimization();
+                startOptimization();
+            }
+        });
+
+        // --- Dragging and City Management ---
+        
+        let isDragging = false;
+        let lastMousePos = { x: 0, y: 0 };
+
+        function getMousePos(e) {
+            const rect = canvas.getBoundingClientRect();
+            let x, y;
+
+            if (e.touches && e.touches.length > 0) {
+                x = e.touches[0].clientX - rect.left;
+                y = e.touches[0].clientY - rect.top;
+            } else {
+                x = e.clientX - rect.left;
+                y = e.clientY - rect.top;
+            }
+            return { x, y };
+        }
+
+        function findCityAt(x, y) {
+            for (let i = 0; i < cities.length; i++) {
+                if (distance(cities[i], { x, y }) < 15) { // Increased hit area for dragging
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        // Mouse Down / Touch Start
+        canvas.addEventListener('mousedown', (e) => {
+            handleStart(getMousePos(e), e);
+        });
+        canvas.addEventListener('touchstart', (e) => {
+            handleStart(getMousePos(e), e);
+        });
+
+        function handleStart(pos, e) {
+            selectedCityIndex = findCityAt(pos.x, pos.y);
+            lastMousePos = pos;
+
+            if (selectedCityIndex !== -1) {
+                isDragging = true;
+                e.preventDefault(); // Prevent default touch actions like scrolling
+                stopOptimization(); // Pause optimization while dragging
+            } else {
+                // If not dragging, add a new city on click/tap
+                if (cities.length < 20) { // Limit cities for performance
+                    cities.push(pos);
+                    initOptimization(); // Re-init optimization variables
+                    draw();
+                } else {
+                    alertModal("City Limit Reached", "Max 20 cities for performance. Delete some or reset.", "info");
+                }
+            }
+        }
+
+        // Mouse Move / Touch Move
+        canvas.addEventListener('mousemove', (e) => {
+            handleMove(getMousePos(e), e);
+        });
+        canvas.addEventListener('touchmove', (e) => {
+            handleMove(getMousePos(e), e);
+        });
+
+        function handleMove(pos, e) {
+            if (isDragging && selectedCityIndex !== -1) {
+                e.preventDefault();
+                // Calculate movement delta
+                const dx = pos.x - lastMousePos.x;
+                const dy = pos.y - lastMousePos.y;
+
+                // Update city position
+                cities[selectedCityIndex].x += dx;
+                cities[selectedCityIndex].y += dy;
+
+                // Clamp position within canvas bounds
+                cities[selectedCityIndex].x = Math.max(CITY_RADIUS, Math.min(canvas.width - CITY_RADIUS, cities[selectedCityIndex].x));
+                cities[selectedCityIndex].y = Math.max(CITY_RADIUS, Math.min(canvas.height - CITY_RADIUS, cities[selectedCityIndex].y));
+
+                // Recalculate path length and update display
+                if (cities.length >= 3) {
+                    bestLength = calculatePathLength(bestPath);
+                    bestLengthDisplay.textContent = bestLength.toFixed(2);
+                }
+
+                lastMousePos = pos;
+                draw();
+            }
+        }
+
+        // Mouse Up / Touch End / Mouse Leave
+        function handleEnd() {
+            if (isDragging) {
+                isDragging = false;
+                selectedCityIndex = -1;
+                initOptimization(); // Re-init data structures after drag is complete
+                draw();
+            }
+        }
+
+        canvas.addEventListener('mouseup', handleEnd);
+        canvas.addEventListener('touchend', handleEnd);
+        canvas.addEventListener('mouseleave', handleEnd);
+
+        // --- Responsive and Initial Setup ---
+
+        function resizeCanvas() {
+            // This is handled inside draw() now, but ensure it runs once on load
+            draw();
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        
+        // Initial draw setup with a few placeholder cities
+        function setupInitialCities() {
+            // Set up initial cities if none exist
+            if (cities.length === 0) {
+                // Wait for canvas size to be calculated after DOM load
+                setTimeout(() => {
+                    const W = canvas.width;
+                    const H = canvas.height;
+                    if (W > 0 && H > 0) {
+                        cities.push({ x: W * 0.2, y: H * 0.2 });
+                        cities.push({ x: W * 0.8, y: H * 0.2 });
+                        cities.push({ x: W * 0.5, y: H * 0.8 });
+                        cities.push({ x: W * 0.2, y: H * 0.6 });
+                        initOptimization();
+                        draw();
+                    }
+                }, 50); 
+            }
+        }
+
+        window.onload = function() {
+            resizeCanvas();
+            setupInitialCities();
+        }
+
+        // --- Custom Modal/Alert System (Replacing alert/confirm) ---
+
+        const modalHtml = `
+            <div id="customModal" class="fixed inset-0 bg-gray-900 bg-opacity-75 hidden items-center justify-center p-4 z-50">
+                <div class="bg-gray-800 p-6 rounded-lg shadow-2xl max-w-sm w-full border border-gray-700">
+                    <h3 id="modalTitle" class="text-xl font-bold mb-3 text-red-400">Alert</h3>
+                    <p id="modalMessage" class="text-gray-300 mb-6"></p>
+                    <div class="flex justify-end">
+                        <button id="modalCloseButton" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-200">
+                            OK
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+        const customModal = document.getElementById('customModal');
+        const modalTitle = document.getElementById('modalTitle');
+        const modalMessage = document.getElementById('modalMessage');
+        const modalCloseButton = document.getElementById('modalCloseButton');
+
+        modalCloseButton.addEventListener('click', () => {
+            customModal.classList.add('hidden');
+            customModal.classList.remove('flex');
+        });
+
+        function alertModal(title, message, type = 'info') {
+            modalTitle.textContent = title;
+            modalMessage.textContent = message;
+            
+            modalTitle.classList.remove('text-red-400', 'text-yellow-400', 'text-blue-400');
+            if (type === 'error') {
+                modalTitle.classList.add('text-red-400');
+            } else if (type === 'warning') {
+                modalTitle.classList.add('text-yellow-400');
+            } else {
+                modalTitle.classList.add('text-blue-400');
+            }
+
+            customModal.classList.add('flex');
+            customModal.classList.remove('hidden');
+        }
+
+    </script>
+</body>
+</html>
